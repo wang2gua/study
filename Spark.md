@@ -2,7 +2,7 @@
 
 ## 前言
 
-Spark 的技术栈有哪些？
+**Spark 的技术栈有哪些？**
 
 ![图片](https://mmbiz.qpic.cn/sz_mmbiz_png/xlgvgPaib7WOiaURKKplpMp4EVzj107TSGeQwkEYPya7vicicJeFRxSAmAEUBXAziax2y2ABuibCq2HAef2EluzWxAOA/640?wx_fmt=png&tp=webp&wxfrom=5&wx_lazy=1&wx_co=1)
 
@@ -16,9 +16,25 @@ Spark 的技术栈有哪些？
 
 
 
-Spark 为什么快？
+**Spark 为什么快？**
 
-为什么不用 Flink？
+***为什么比MapReduce 快？***
+
+Spark的DAGScheduler相当于一个改进版的MapReduce，如果计算不涉及与其他节点进行数据交换，Spark可以在内存中一次性完成这些操作，也就是**中间结果**无须落盘，减少了磁盘IO的操作。但是，如果计算过程中涉及数据交换，Spark也是会把shuffle的数据写磁盘的！
+
+有同学提到，Spark是基于内存的计算，所以快，这也不是主要原因，要对数据做计算，必然得加载到内存，Hadoop也是如此，只不过Spark支持将需要反复用到的数据给Cache到内存中，减少数据加载耗时，所以Spark跑机器学习算法比较在行（需要对数据进行反复迭代）。Spark基于磁盘的计算依然也是比Hadoop快。
+
+***Spark为什么比 Hive 快？***
+
+1. **消除了冗余的 HDFS 读写**: Hadoop 每次 shuffle 操作后，必须写到磁盘，而 Spark 在 shuffle 后不一定落盘，可以 cache 到内存中，以便迭代时使用。如果操作复杂，很多的 shufle 操作，那么 Hadoop 的读写 IO 时间会大大增加，也是 Hive 更慢的主要原因了
+2. **消除了冗余的 MapReduce 阶段**: Hadoop 的 shuffle 操作一定连着完整的 MapReduce 操作，冗余繁琐。而 Spark 基于 RDD 提供了丰富的算子操作，且 reduce 操作产生 shuffle 数据，可以缓存在内存中
+3. **JVM 的优化**: Hadoop 每次 MapReduce 操作，启动一个 Task 便会启动一次 JVM，基于进程的操作。而 Spark 每次 MapReduce 操作是基于线程的，只在启动 Executor 是启动一次 JVM，内存的 Task 操作是在线程复用的。每次启动 JVM 的时间可能就需要几秒甚至十几秒，那么当 Task 多了，这个时间 Hadoop 不知道比 Spark 慢了多少.
+4. 但是Hive 早期版本默认使用 MapReduce 作为查询引擎。比较新的 Hive 也是用 Tez 作为查询引擎，采用了DAG 的执行模型。
+
+为什么不用 Flink与Spark 的技术选型？
+
+- **Flink**：适合需要低延迟、高吞吐量的实时数据处理场景，如实时分析、实时监控和复杂事件处理。
+- **Spark**：适合大规模的数据分析和处理任务，如ETL、批量数据处理和机器学习。
 
 Spark 3.X 有什么新特性？
 
@@ -30,9 +46,11 @@ Spark 3.X 有什么新特性？
 
 ## Spark如何运行（一个Spark job是怎么跑起来的）？
 
-![1721142303398](C:\Users\wang2\AppData\Roaming\Typora\typora-user-images\1721142303398.png)
+
 
 **Spark 有三大组件组成：**
+
+![img](https://pic2.zhimg.com/80/v2-2390f979cb9144e89ba1e95dddfa1f15_720w.webp)
 
 1. Cluster Manager：
    1. 负责管理集群资源，包括节点的分配和监控。
@@ -49,6 +67,8 @@ Spark 3.X 有什么新特性？
    3. Executor还负责管理其节点上的内存和存储资源，以及与外部存储系统（如HDFS）的交互。
 
 **运行过程如下：**
+
+![1721142303398](https://pic4.zhimg.com/80/v2-9cfaf397c4cf2be0ea7909a90661971f_720w.webp)
 
 1. **提交任务**：用户通过Client提交一个Spark任务。这通常涉及到编写一个Spark应用程序，并使用`spark-submit`命令来提交。
 2. **初始化SparkContext**：在Spark应用程序中，首先会初始化一个`SparkContext`对象。`SparkContext`是Spark应用程序的入口点，负责与Cluster Manager通信。
