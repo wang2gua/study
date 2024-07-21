@@ -2,7 +2,7 @@
 
 ## 概念
 
-### **Spark 的技术栈有哪些？**
+### Spark 的技术栈有哪些？
 
 ![图片](https://mmbiz.qpic.cn/sz_mmbiz_png/xlgvgPaib7WOiaURKKplpMp4EVzj107TSGeQwkEYPya7vicicJeFRxSAmAEUBXAziax2y2ABuibCq2HAef2EluzWxAOA/640?wx_fmt=png&tp=webp&wxfrom=5&wx_lazy=1&wx_co=1)
 
@@ -14,29 +14,29 @@
 
 我们主要讨论的是 Spark Core 的部分。
 
-### **Spark 为什么快？**
+### Spark 为什么快？
 
-#### **为什么比MapReduce 快？**
+#### 为什么比MapReduce 快？
 
 Spark的DAGScheduler相当于一个改进版的MapReduce，如果计算不涉及与其他节点进行数据交换，Spark可以在内存中一次性完成这些操作，也就是**中间结果**无须落盘，减少了磁盘IO的操作。但是，如果计算过程中涉及数据交换，Spark也是会把shuffle的数据写磁盘的！
 
 有同学提到，Spark是基于内存的计算，所以快，这也不是主要原因，要对数据做计算，必然得加载到内存，Hadoop也是如此，只不过Spark支持将需要反复用到的数据给Cache到内存中，减少数据加载耗时，所以Spark跑机器学习算法比较在行（需要对数据进行反复迭代）。Spark基于磁盘的计算依然也是比Hadoop快。
 
-#### **Spark为什么比 Hive 快？**
+#### Spark为什么比 Hive 快？
 
 1. **消除了冗余的 HDFS 读写**: Hadoop 每次 shuffle 操作后，必须写到磁盘，而 Spark 在 shuffle 后不一定落盘，可以 cache 到内存中，以便迭代时使用。如果操作复杂，很多的 shufle 操作，那么 Hadoop 的读写 IO 时间会大大增加，也是 Hive 更慢的主要原因了
 2. **消除了冗余的 MapReduce 阶段**: Hadoop 的 shuffle 操作一定连着完整的 MapReduce 操作，冗余繁琐。而 Spark 基于 RDD 提供了丰富的算子操作，且 reduce 操作产生 shuffle 数据，可以缓存在内存中
 3. **JVM 的优化**: Hadoop 每次 MapReduce 操作，启动一个 Task 便会启动一次 JVM，基于进程的操作。而 Spark 每次 MapReduce 操作是基于线程的，只在启动 Executor 是启动一次 JVM，内存的 Task 操作是在线程复用的。每次启动 JVM 的时间可能就需要几秒甚至十几秒，那么当 Task 多了，这个时间 Hadoop 不知道比 Spark 慢了多少.
 4. 但是Hive 2.X版本默认使用 MapReduce 作为查询引擎。比较新的 Hive 也是用 Tez, Spark 作为查询引擎，采用了DAG 的执行模型。
 
-### **Flink与Spark 的技术选型？**
+#### Flink与Spark 的技术选型？
 
 1. **批处理任务**：如果主要任务是大规模的批处理，Spark依然是一个强大的选择，特别是其内存计算模型和Spark SQL的能力。
 2. **实时流处理**：对于低延迟、高吞吐量的实时流处理任务，Flink通常是更好的选择。
 3. **混合任务**：如果需要同时处理批和流数据，并且希望使用统一的API，Flink的批流统一模型可能更具优势。
 4. **机器学习**：在机器学习领域，Spark MLlib仍然是一个强有力的工具，特别是在批处理和离线训练场景中。
 
-### **Spark 3.X 有什么新特性？**
+### Spark 3.X 有什么新特性？
 
 ## RDD(Resilient Distributed Datasets,弹性分布式数据集)
 
@@ -62,7 +62,7 @@ RDD是一个只读的，分片的记录集合。RDD只能通过(1)静态存储�
 * partitioner，返回RDD是否hash/范围分片的元数据（可选）
 * 列出Partition p能快速访问的节点，基于数据局部性（可选）
 
-### **RDD的操作（算子）**
+### RDD的操作（算子）
 
 RDD的操作分为 `Transformation`和 `Action`，`Transformation`是数据的转换，是延时执行的，只有遇到后面的 `Action`操作才会真正执行。
 
@@ -132,7 +132,7 @@ errors.filter(_.contains("HDFS"))
 
 通常，我们称旧 RDD 为父 RDD，新 RDD 为子 RDD。在这个转换的过程里，新旧 RDD 自然会建立起类似父子的联系，这个联系从概念来说便是 RDD 的依赖关系，在代码层面由抽象类 **Dependency** 表示。
 
-##### **宽窄依赖**
+##### 宽窄依赖
 
 *掌握宽窄依赖，是后续学习 RDD 阶段划分的基础，而 RDD 阶段划分，又是学习 Spark 任务划分的前提。这一系列知识，将有助于我们了解一个计算应用在提交后的执行过程。*
 
@@ -147,7 +147,7 @@ errors.filter(_.contains("HDFS"))
 
 窄依赖的RDD，支持同一个节点内的数据的流水线执行，不需要数据在节点之间的传输。与MapReduce比较，节省了数据传输的花销。而宽依赖的RDD，需要多个父RDD的数据，需要多个节点之间数据的shuffle，来传输数据。窄依赖的RDD，节点故障后的恢复更为高效，只需要重新计算丢失的RDD数据。而宽依赖的RDD，一个节点故障后，需要从宽依赖的继承图中的祖先节点，开始重新计算。
 
-#### RDD的血缘关系（Lineage）
+### RDD的血缘关系（Lineage）
 
 血缘关系是 RDD 的重要特性之一，基于 RDD 核心属性 `dependencies` 实现，它描述了一个 RDD 是如何从初始 RDD 计算得来的。
 
@@ -161,16 +161,16 @@ errors.filter(_.contains("HDFS"))
 
 *血缘关系的存在使 RDD 具备了容错性。当 RDD 的部分分区数据丢失时，Spark 可以通过血缘关系获取足够的关联信息，进而重新计算并恢复丢失的分区。*
 
-#### RDD的持久化
+### RDD的持久化
 
 
-#### RDD 的检查点
+### RDD 的检查点
 
 
 
 ## Spark如何运行/一个Spark job是怎么跑起来的/Spark 任务调度？
 
-### **Spark 有三大组件组成：**
+### Spark 有三大组件组成：
 
 ![img](https://pic2.zhimg.com/80/v2-2390f979cb9144e89ba1e95dddfa1f15_720w.webp)
 
@@ -190,7 +190,7 @@ errors.filter(_.contains("HDFS"))
    2. 每个Executor包含多个Task线程，每个Task线程执行一个任务。
    3. Executor还负责管理其节点上的内存和存储资源，以及与外部存储系统（如HDFS）的交互。
 
-### **运行过程如下：**
+### 运行过程如下：
 
 ![Spark job](https://pic4.zhimg.com/80/v2-9cfaf397c4cf2be0ea7909a90661971f_720w.webp)
 
@@ -206,7 +206,7 @@ errors.filter(_.contains("HDFS"))
 10. **动态分区**：如果使用了动态分区，Spark会在执行过程中动态创建分区，并在执行完成后将结果写入外部存储系统。
 11. **关闭SparkContext**：在所有任务执行完毕后，`SparkContext`会被关闭，释放资源。
 
-### **任务是如何被划分的？（[参考](https://blog.csdn.net/benjam1n77/article/details/126513983)）**
+### 任务是如何被划分的？（[参考](https://blog.csdn.net/benjam1n77/article/details/126513983)）
 
 #### Job,Stage,Task
 
@@ -264,7 +264,7 @@ Shuffle
 
 ## 名词术语
 
-- 1.Application：用户编写的spark的程序，其中包括一个Driver功能的代码块和分布在集群中多个节点上运行的Executor代码。
+- Application：用户编写的spark的程序，其中包括一个Driver功能的代码块和分布在集群中多个节点上运行的Executor代码。
 - Driver：运行上述的Application的main函数并创建SparkContext，目的是为了准备spark的运行环境，在spark中有SparkContext负责和ClusterManager通信，进行资源的申请、任务的分配和监控等，当Exectutor运行完毕的时候，负责把SparkContext关闭。
 - Executor：某个Application运行在Worker节点的一个**进程**，该进程负责某些Task，并且负责将数据存到内存或磁盘上，每个Application都有各自独立的一批Executor，在Spark on yarn模式下，该进程被称为CoarseGrainedExecutor Backend。一个CoarseGrainedExecutor
   Backend有且仅有一个Executor对象，负责将Task包装成taskRuuner，并从线程池中抽取一个空闲线程运行Task，每一个CoarseGrainedExecutor Backend能够运行的Task数量取决于cpu数量。
