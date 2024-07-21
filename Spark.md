@@ -126,13 +126,13 @@ errors.filter(_.contains("HDFS"))
 | **saveAsSequenceFile** ( *path* ) | 将数据集以 SequenceFile 格式写到本地磁盘或 HDFS 的指定目录下，仅适用于 (K, V) 形式且 K 和 V 均实现了 Hadoop Writable 接口的数据集 |
 | **saveAsObjectFile** ( *path* )   | 将数据集序列化成对象保存至本地磁盘或 HDFS 的指定目录下                                                                            |
 
-#### RDD 的依赖关系
+### RDD 的依赖关系
 
 在计算逻辑中，不可避免的会出现 RDD 转换的过程，即旧的 RDD 调用转换算子生成新的 RDD。
 
 通常，我们称旧 RDD 为父 RDD，新 RDD 为子 RDD。在这个转换的过程里，新旧 RDD 自然会建立起类似父子的联系，这个联系从概念来说便是 RDD 的依赖关系，在代码层面由抽象类 **Dependency** 表示。
 
-##### 宽窄依赖
+#### 宽窄依赖
 
 *掌握宽窄依赖，是后续学习 RDD 阶段划分的基础，而 RDD 阶段划分，又是学习 Spark 任务划分的前提。这一系列知识，将有助于我们了解一个计算应用在提交后的执行过程。*
 
@@ -167,7 +167,6 @@ RDD 持久化是 Spark 中一个很重要的特性。通过这个特性，Spark 
 
 ![](https://magicpenta.github.io/assets/images/persist-614a0394c044daea0faf90a3a13cd164.svg)
 
-
 假设某个计算任务有 3 个阶段：
 
 * STEP 01 从 HDFS 读取文件并创建 RDD A
@@ -194,7 +193,6 @@ Executor 端执行任务的源码，具体过程如下图：
 在代码中，我们可以使用 `cache()` 方法或者 `persist()` 方法来指定持久化。其中，`persist()` 方法存在一个名为 **存储级别** 的参数，该参数将决定 RDD 持久化具体的存储位置与存储行为。
 
 `cache()` 实际上调用的是 `persist(StorageLevel.MEMORY_ONLY)` 方法，即基于内存缓存 RDD。
-
 
 | **持久化级别** | **含义**                                                                                                     |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -231,13 +229,53 @@ Executor 端执行任务的源码，具体过程如下图：
 | 血缘关系 | 不切断                         | 切断                         |
 | 使用场景 | 支持在同一个应用中复用计算结果 | 支持在多个应用中复用计算结果 |
 
+![](https://magicpenta.github.io/assets/images/checkpoint-3600f69c6aaaa8bbf94c2dd7990890be.svg)
+
+图中的 **步骤 4** 表明，**检查点机制本质上就是再执行一遍 RDD 的计算逻辑，然后将计算结果保存至外部存储。**
+
+*官方建议，使用 `checkpoint()` 前最好通过 `cache()` 缓存计算结果，以避免检查点存储快照时发生重复计算。*
+
+## Spark 共享变量？
+
+问题：
+算子中对算子外的变量进行计算，然而最终的计算结果不符合预期：
+
+```
+val rdd: RDD[Int] = sc.makeRDD(List(1, 2, 3, 4))
+
+var sum: Int = 0
+rdd.foreach(num => {
+  sum += num
+})
+
+println("sum => " + sum)
+```
+
+使用这段代码进行求和计算，`sum` 的最终结果为 `0`。
+
+示例中 `sum += num` 是分发到 Executor 端计算的。在各节点的 Executor 开始计算前，会拷贝一份 `sum` 到其本地，然后执行 `sum += num`。但是，在最终 Executor 返回计算结果给 Driver 时，并不会将 `sum` 这种非 RDD 内部数据的普通变量一并返回，因此我们在 Driver 中所看到的 `sum` 变量实际上并没有参与计算，依旧是初始值 `0`
+
+### 累加器（Accumulators）
 
 
+使用示例
 
+```
+ val rdd: RDD[Int] = sc.makeRDD(List(1, 2, 3, 4))
+  
+    val sumAccumulator: LongAccumulator = sc.longAccumulator("sum")
+    rdd.foreach(num => {
+      sumAccumulator.add(num)
+    })
 
+    println("sum => " + sumAccumulator.value)
+```
 
+### 广播变量（Broadcast Variables）
 
-## Spark 任务调度(一个Spark job是怎么跑起来的)？
+## Spark 任务调度？
+
+面试问题：一个Spark job是怎么跑起来的？
 
 ### Spark 有三大组件组成：
 
@@ -259,42 +297,57 @@ Executor 端执行任务的源码，具体过程如下图：
    2. 每个Executor包含多个Task线程，每个Task线程执行一个任务。
    3. Executor还负责管理其节点上的内存和存储资源，以及与外部存储系统（如HDFS）的交互。
 
-### 运行过程如下：
-
-![Spark job](https://pic4.zhimg.com/80/v2-9cfaf397c4cf2be0ea7909a90661971f_720w.webp)
-
-1. **提交任务**：用户通过Client提交一个Spark任务。这通常涉及到编写一个Spark应用程序，并使用 `spark-submit`命令来提交。
-2. **初始化SparkContext**：在Spark应用程序中，首先会初始化一个 `SparkContext`对象。`SparkContext`是Spark应用程序的入口点，负责与Cluster Manager通信。
-3. **资源申请**：`SparkContext`向Cluster Manager注册并申请Executor资源。Cluster Manager负责资源的分配和管理。
-4. **启动Executors**：Cluster Manager在各个工作节点上启动Executors。Executor是Spark应用程序在工作节点上的执行环境，负责执行任务。Executor 对 Driver 发送心跳。
-5. **构建DAG**：Spark应用程序中的RDD操作会构建一个有向无环图（DAG），这个图表示了RDD之间的依赖关系。
-6. **划分Stage**：DAG Scheduler负责将DAG划分为多个Stage。每个Stage包含一组可以并行执行的任务（Task）。
-7. **任务分配**：Task Scheduler负责将任务分配给Executor执行。Executor会向SparkContext申请任务。
-8. **执行任务**：Executor接收到任务后，会执行相应的代码。在执行过程中，可能会涉及到数据的读取、转换和写入。
-9. **结果返回**：任务执行完成后，结果会返回给Driver。在某些情况下，结果可能会直接写入外部存储系统，如HDFS。
-10. **动态分区**：如果使用了动态分区，Spark会在执行过程中动态创建分区，并在执行完成后将结果写入外部存储系统。
-11. **关闭SparkContext**：在所有任务执行完毕后，`SparkContext`会被关闭，释放资源。
-
-### 任务是如何被划分的？（[参考](https://blog.csdn.net/benjam1n77/article/details/126513983)）
+### 概述（[参考](https://blog.csdn.net/benjam1n77/article/details/126513983)）
 
 #### Job,Stage,Task
 
 ![任务划分](https://pic2.zhimg.com/80/v2-dada5b5cb068774daf44dd2ac4e2ee15_720w.webp)
+
+**第一方面，是理清 Application、Job、Stage、Task 的含义及关联。**
 
 首先，Job=多个stage，Stage=多个同种task, Task分为ShuffleMapTask和ResultTask，Dependency分为宽依赖（ShuffleDependency）和窄依赖（NarrowDependency）。
 
 * Application： 用户提交的Spark应用程序。
 * Job：Spark作业，是 Application 的子集。Spark 中的算子分为 transformation 和 action，一个 action就会触发一个 Job。
 * Stage: 一个Job会被划分为多个 Stage， Stage 以宽依赖为划分的依据。Shuffle前后的 RDD 属于不同的stage。
-* Task：一个 Stage 包含一个或者多个 Task，一个stage的task数量由最后一个 RDD的 partition 数量决定。
+* Task：一个 Stage 包含一个或者多个 Task，Task对应单个线程，会被封装成 TaskDescription 对象提交到 Executor 的线程池中执行。一个stage的task数量由最后一个 RDD的 partition 数量决定。
 
-**DAGScheduler，TaskScheduler, Schedulerbacked**
+**第二方面，是了解 Driver 和 Executor 在任务调度中扮演的角色。**
+
+Driver 是运行用户程序 `main()` 函数并创建 SparkContext 的实例，是任务调度中最为关键的部分。
+
+在一个完整的任务调度中，用户提交的程序会经历 ***Application → Job → Stage → Task*** 的转化过程，而这整个转化过程，由 Driver 的 3 大核心模块共同完成，它们的名称与职责如下表所示：
 
 * DAGScheduler：根据RDD的依赖关系，将Job划分为一个或多个Stage，每个Stage会依据最后一个RDD的partition的数量生成一个或多个Task，同一Stage的Task属于同一TaskSet（任务集），DAGScheduler向TaskScheduler提交任务是以TaskSet为单位。
 * TaskScheduler：接收来自DAGScheduler提交的TaskSet，向Executor分发Task。
-* SchedulerBackend：TaskScheduler与Executor进行RPC通信的后台。
+* SchedulerBackend：TaskScheduler与Executor进行RPC通信的后台。调度后端，维持与 Executor 的通信，并负责将 Task 提交到 Executor。
 
-![img](https://img-blog.csdnimg.cn/41d9c067535b49fda075238bae3ef083.png#pic_center)
+Executor 是执行实际计算任务的实例，是任务调度的终点，它包含以下核心模块：
+
+* ThreadPool: 任务执行的线程池，用于执行Driver提交的 Task。
+* Blockmanager:存储管理器，为RDD提供缓存服务，提高计算速率。
+* ExcutorManager:Executor调度后端，维持与Driver的通信，将计算结果返回给 Driver。
+
+*DAG（Directed Acyclic Graph）是一个有向无环图，由点和线组成，该图具有方向，不会闭环。*
+
+### 调度流程
+
+Spark 任务调度基本上会经历  ***提交 → Stage 划分 → Task 调度 → Task 执行*** ，这个过程大致可以描述为：
+
+1. 用户提交一个计算应用（Application）
+2. Driver 执行用户程序中的 `main()` 方法，根据行动算子提取作业（Job）
+3. DAGScheduler 解析各个作业的 DAG 进行阶段（Stage）划分和任务集（TaskSet）组装
+4. TaskScheduler 将任务集发送至任务队列 rootPool
+5. SchedulerBackend 通过 Cluster Manager 获取 Executor 资源，并将任务（Task）发送给 Executor
+6. Executor 执行计算并管理存储块（Block）
+7. Driver 最终从 Executor 获得计算结果，汇总后返回给用户
+
+该过程也可以使用流程图来表示：
+
+![](https://magicpenta.github.io/assets/images/schedule-2b55552742ce32a978b8c370ff080f30.svg)
+
+### Stage划分
+
 
 ## 运行模式
 
@@ -308,23 +361,9 @@ Executor 端执行任务的源码，具体过程如下图：
 
 Yarn是什么？做什么的？
 
-## RDD与算子
+## Spark Shuffle
 
-#### RDD是什么，有什么特性
-
-RDD的宽窄依赖
-
-任务切分-DAG图
-
- Spark RDD是怎么容错
-
-Shuffle
-
- transform算子、action算子
-
-#### 说说map和mapPartitions的区别
-
-#### 说说RDD.cache()和RDD.persist()的区别:
+### Shuffle 简介
 
 ## 性能调优
 
@@ -349,3 +388,4 @@ Shuffle
 
 1. https://liangyaopei.github.io/2021/01/16/apache-spark-rdd-intro/
 2. https://magicpenta.github.io/docs/
+3. Spark 算子：https://developer.aliyun.com/article/653927
