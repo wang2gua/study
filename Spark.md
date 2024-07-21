@@ -1,6 +1,6 @@
 # Spark
 
-## 前言
+## 概念
 
 **Spark 的技术栈有哪些？**
 
@@ -29,14 +29,16 @@ Spark的DAGScheduler相当于一个改进版的MapReduce，如果计算不涉及
 1. **消除了冗余的 HDFS 读写**: Hadoop 每次 shuffle 操作后，必须写到磁盘，而 Spark 在 shuffle 后不一定落盘，可以 cache 到内存中，以便迭代时使用。如果操作复杂，很多的 shufle 操作，那么 Hadoop 的读写 IO 时间会大大增加，也是 Hive 更慢的主要原因了
 2. **消除了冗余的 MapReduce 阶段**: Hadoop 的 shuffle 操作一定连着完整的 MapReduce 操作，冗余繁琐。而 Spark 基于 RDD 提供了丰富的算子操作，且 reduce 操作产生 shuffle 数据，可以缓存在内存中
 3. **JVM 的优化**: Hadoop 每次 MapReduce 操作，启动一个 Task 便会启动一次 JVM，基于进程的操作。而 Spark 每次 MapReduce 操作是基于线程的，只在启动 Executor 是启动一次 JVM，内存的 Task 操作是在线程复用的。每次启动 JVM 的时间可能就需要几秒甚至十几秒，那么当 Task 多了，这个时间 Hadoop 不知道比 Spark 慢了多少.
-4. 但是Hive 早期版本默认使用 MapReduce 作为查询引擎。比较新的 Hive 也是用 Tez 作为查询引擎，采用了DAG 的执行模型。
+4. 但是Hive 2.X版本默认使用 MapReduce 作为查询引擎。比较新的 Hive 也是用 Tez, Spark 作为查询引擎，采用了DAG 的执行模型。
 
-为什么不用 Flink与Spark 的技术选型？
+ **Flink与Spark 的技术选型？**
 
-- **Flink**：适合需要低延迟、高吞吐量的实时数据处理场景，如实时分析、实时监控和复杂事件处理。
-- **Spark**：适合大规模的数据分析和处理任务，如ETL、批量数据处理和机器学习。
+1. **批处理任务**：如果主要任务是大规模的批处理，Spark依然是一个强大的选择，特别是其内存计算模型和Spark SQL的能力。
+2. **实时流处理**：对于低延迟、高吞吐量的实时流处理任务，Flink通常是更好的选择。
+3. **混合任务**：如果需要同时处理批和流数据，并且希望使用统一的API，Flink的批流统一模型可能更具优势。
+4. **机器学习**：在机器学习领域，Spark MLlib仍然是一个强有力的工具，特别是在批处理和离线训练场景中。
 
-Spark 3.X 有什么新特性？
+**Spark 3.X 有什么新特性？**
 
 
 
@@ -68,7 +70,7 @@ Spark 3.X 有什么新特性？
 
 **运行过程如下：**
 
-![1721142303398](https://pic4.zhimg.com/80/v2-9cfaf397c4cf2be0ea7909a90661971f_720w.webp)
+![Spark job](https://pic4.zhimg.com/80/v2-9cfaf397c4cf2be0ea7909a90661971f_720w.webp)
 
 1. **提交任务**：用户通过Client提交一个Spark任务。这通常涉及到编写一个Spark应用程序，并使用`spark-submit`命令来提交。
 2. **初始化SparkContext**：在Spark应用程序中，首先会初始化一个`SparkContext`对象。`SparkContext`是Spark应用程序的入口点，负责与Cluster Manager通信。
@@ -84,7 +86,27 @@ Spark 3.X 有什么新特性？
 
 **任务是如何被划分的？**
 
+![任务划分](https://pic2.zhimg.com/80/v2-dada5b5cb068774daf44dd2ac4e2ee15_720w.webp)
 
+首先，Job=多个stage，Stage=多个同种task, Task分为ShuffleMapTask和ResultTask，Dependency分为宽依赖（ShuffleDependency）和窄依赖（NarrowDependency）。
+
+Job：Spark 中的算子分为 transformation 和 action，一个 action就会触发一个 Job。
+
+Stage: 一个Job会被划分为多个 Stage， Stage 以宽依赖为划分的依据。Shuffle前后的 RDD 属于不同的stage。
+
+Task：一个 Stage 包含一个或者多个 Task，一个stage的task数量由最后一个 RDD的 partition 数量决定。
+
+**宽窄依赖**
+
+（1）宽依赖(ShuffleDependency)：多个子RDD的Partition依赖一个父RDD的Partition。例如，
+
+![宽依赖示例](https://img-blog.csdnimg.cn/dea4c38ba23f45508d5aeaf412e9c35f.png)
+
+（2）窄依赖(NarrowDependency)：每一个父RDD的一个Partition只被一个子RDD的Partition使用，或者多个父RDD指向一个子RDD分区。
+
+DAGScheduler，TaskScheduler, Schedulerbacked
+
+![img](https://img-blog.csdnimg.cn/41d9c067535b49fda075238bae3ef083.png#pic_center)
 
 
 
