@@ -29,7 +29,7 @@ Spark的DAGScheduler相当于一个改进版的MapReduce，如果计算不涉及
 3. **JVM 的优化**: Hadoop 每次 MapReduce 操作，启动一个 Task 便会启动一次 JVM，基于进程的操作。而 Spark 每次 MapReduce 操作是基于线程的，只在启动 Executor 是启动一次 JVM，内存的 Task 操作是在线程复用的。每次启动 JVM 的时间可能就需要几秒甚至十几秒，那么当 Task 多了，这个时间 Hadoop 不知道比 Spark 慢了多少.
 4. 但是Hive 2.X版本默认使用 MapReduce 作为查询引擎。比较新的 Hive 也是用 Tez, Spark 作为查询引擎，采用了DAG 的执行模型。
 
-#### Flink与Spark 的技术选型？
+### Flink与Spark 的技术选型？
 
 1. **批处理任务**：如果主要任务是大规模的批处理，Spark依然是一个强大的选择，特别是其内存计算模型和Spark SQL的能力。
 2. **实时流处理**：对于低延迟、高吞吐量的实时流处理任务，Flink通常是更好的选择。
@@ -153,8 +153,6 @@ errors.filter(_.contains("HDFS"))
 
 ![](https://magicpenta.github.io/assets/images/lineage-5e980c3ac6ec7d1daa2802cf7d23efd6.svg)
 
-
-
 图例展现了一个 Spark 应用从输入到输出的过程。在该过程中，存在着一系列 RDD 的创建与转换，Spark 会记录转换过程中各个 RDD 的依赖关系，并在 RDD F 调用行动算子后构建 DAG 图，触发真正的计算。
 
 将上述过程中 RDD 的依赖关系串联起来，便形成一个血缘关系（Lineage）。在血缘关系中，下一代的 RDD 依赖于上一代的 RDD。以图例说明，B 依赖于 A，D 依赖于 C，E 依赖于 B 和 D。
@@ -163,12 +161,83 @@ errors.filter(_.contains("HDFS"))
 
 ### RDD的持久化
 
+RDD 持久化是 Spark 中一个很重要的特性。通过这个特性，Spark 可以在内存或磁盘缓存某个 RDD，当其他行动算子需要这个 RDD 时直接复用它，以  **避免重新计算** ，进而提高性能。
 
-### RDD 的检查点
+我们通过一个例子对 RDD 持久化展开说明：
+
+![](https://magicpenta.github.io/assets/images/persist-614a0394c044daea0faf90a3a13cd164.svg)
+
+
+假设某个计算任务有 3 个阶段：
+
+* STEP 01 从 HDFS 读取文件并创建 RDD A
+* STEP 02 通过转换算子基于 RDD A 生成 RDD B
+* STEP 03 通过行动算子基于 RDD B 输出两个结果
+
+如果没有缓存机制，STEP 03 将会触发两次完整的计算，即 STEP 01 → STEP 02 → STEP 03 将完整执行两次。
+
+如果使用了缓存机制，STEP 03 在输出 result2 时，将直接复用 result1 中已缓存的 RDD B，RDD B 之前的计算环节不会被重新执行。
+
+#### 复用原理
+
+* 无论缓存是否开启，基于 RDD B 拆解出的计算任务都会被重复调度
+* 基于 RDD B 拆解出的计算任务在重复发布到 Executor 执行时，会直接读取缓存中的计算结果，不会触发实际的计算
+
+Executor 端执行任务的源码，具体过程如下图：
+
+![](https://magicpenta.github.io/assets/images/cache-be38ab2de169825ffe55789741ba645b.svg)
+
+其中 **步骤 4** 的 BlockResult 便是我们想要的缓存结果。若 BlockResult 有值，直接返回给 Executor，不再触发计算；若 BlockResult 为空，则需要执行计算再返回结果。
+
+#### 存储级别
+
+在代码中，我们可以使用 `cache()` 方法或者 `persist()` 方法来指定持久化。其中，`persist()` 方法存在一个名为 **存储级别** 的参数，该参数将决定 RDD 持久化具体的存储位置与存储行为。
+
+`cache()` 实际上调用的是 `persist(StorageLevel.MEMORY_ONLY)` 方法，即基于内存缓存 RDD。
+
+
+| **持久化级别** | **含义**                                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| MEMORY_ONLY          | 将 RDD 以反序列化 Java 对象的形式存储在 JVM 中，如果大小超过可用内存，则超出部分不会缓存，需重新计算               |
+| MEMORY_AND_DISK      | 将 RDD 以反序列化 Java 对象的形式存储在 JVM 中，如果大小超过可用内存，则超出部分会存在在磁盘上，当需要时从磁盘读取 |
+| DISK_ONLY            | 将所有 RDD 分区存储到磁盘上                                                                                        |
+| MEMORY_ONLY_SER      | 将 RDD 以序列化 Java 对象的形式存储在 JVM 中，具有更好的空间利用率，但是需要占用更多的 CPU 资源                    |
+| MEMORY_AND_DISK_SER  | 将 RDD 以序列化 Java 对象的形式存储在 JVM 中，如果大小超过可用内存，则超出部分会存在在磁盘上，无需重新计算         |
+| MEMORY_ONLY_2        | 与 MEMORY_ONLY 级别相同，存在副本                                                                                  |
+| MEMORY_AND_DISK_2    | 与 MEMORY_AND_DISK 级别相同，存在副本                                                                              |
+
+官方使用建议：
+
+**Tip 01** 如果 RDD 与默认存储级别 `MEMORY_ONLY` 契合，就选择默认存储级别。
+
+**Tip 02** 如果 RDD 与默认存储级别 `MEMORY_ONLY` 不契合，则尝试使用 `MEMORY_ONLY_SER` 并选择一个合适的序列化库，这支持 Spark 在具备较高空间利用率的情况下依旧支持快速访问。
+
+**Tip 03** 尽量不要将缓存数据写到磁盘上，除非数据量特别大或者需要过滤大量数据，因为重新计算的速度与从硬盘读取数据的速度相差不多。
+
+**Tip 04** 如果想要具备故障快速恢复能力，可以选择带有副本的存储级别。当然，没有副本的存储级别并非是不安全的，它们同样具备容错机制，只是在故障恢复时需要重新计算，无法像带有副本的存储级别那样直接通过副本恢复。
+
+### RDD 的检查点（Checkpoint）
+
+检查点是 RDD 的一种容错保障机制，由 RDD 的 `checkpoint()` 方法触发。它主要做了两件事：
+
+* 重新计算调用了 `checkpoint()` 方法的 RDD，并将计算结果保存至外部存储（本地文件系统、分布式文件系统等）
+* 切断原有的血缘关系
+
+乍看之下，会觉得检查点与持久化非常相似，都有保存 RDD 计算结果的功能，但实际上两者还是有所区别的：
+
+| 区别项   | RDD 持久化                     | RDD 检查点                   |
+| -------- | ------------------------------ | ---------------------------- |
+| 生命周期 | 应用结束便删除                 | 永久保存                     |
+| 血缘关系 | 不切断                         | 切断                         |
+| 使用场景 | 支持在同一个应用中复用计算结果 | 支持在多个应用中复用计算结果 |
 
 
 
-## Spark如何运行/一个Spark job是怎么跑起来的/Spark 任务调度？
+
+
+
+
+## Spark 任务调度(一个Spark job是怎么跑起来的)？
 
 ### Spark 有三大组件组成：
 
@@ -214,7 +283,8 @@ errors.filter(_.contains("HDFS"))
 
 首先，Job=多个stage，Stage=多个同种task, Task分为ShuffleMapTask和ResultTask，Dependency分为宽依赖（ShuffleDependency）和窄依赖（NarrowDependency）。
 
-* Job：Spark 中的算子分为 transformation 和 action，一个 action就会触发一个 Job。
+* Application： 用户提交的Spark应用程序。
+* Job：Spark作业，是 Application 的子集。Spark 中的算子分为 transformation 和 action，一个 action就会触发一个 Job。
 * Stage: 一个Job会被划分为多个 Stage， Stage 以宽依赖为划分的依据。Shuffle前后的 RDD 属于不同的stage。
 * Task：一个 Stage 包含一个或者多个 Task，一个stage的task数量由最后一个 RDD的 partition 数量决定。
 
@@ -274,3 +344,8 @@ Shuffle
   - Hadoop Yarn：只要指yarn中的ResourceManager
 - Worker：集群中可以运行Application代码的节点，在sparkstandalone模式中是通过slave文件配置的worker节点，在Spark on yarn模式下就是NodeManager节点。
 - Task：被送到某个Executor上的工作单元，和HadoopMR中的MapTask、ReduceTask概念一样，是运行Application的基本单位。多个Task组成一个Stage，而Task的调度和管理等是由TaskScheduler负责。
+
+## 参考资料
+
+1. https://liangyaopei.github.io/2021/01/16/apache-spark-rdd-intro/
+2. https://magicpenta.github.io/docs/
