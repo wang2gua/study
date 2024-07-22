@@ -389,3 +389,4 @@ Yarn是什么？做什么的？
 1. https://liangyaopei.github.io/2021/01/16/apache-spark-rdd-intro/
 2. https://magicpenta.github.io/docs/
 3. Spark 算子：https://developer.aliyun.com/article/653927
+4. Spark 算子源码：https://www.cnblogs.com/ronnieyuan/p/11768536.html
