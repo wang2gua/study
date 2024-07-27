@@ -348,6 +348,176 @@ Spark 任务调度基本上会经历  ***提交 → Stage 划分 → Task 调度
 
 ### Stage划分
 
+Stage 划分是任务调度的第一步，由 DAGScheduler 完成，它决定了  **一个 Job 将被划分为多少个 TaskSet** 。
+
+#### 基本概念
+
+相较于 Task，Stage 的定义显得难以理解。在官方定义上，**Stage 是一个并行任务（Task）的集合，这个集合上的 Task，都来源于同一个 Job，具有相同的计算逻辑。**
+
+对于部分初学者来说，看到 Stage 的概念可能有此困惑：已知 Task 是实际执行计算任务的单元，为何还需要 Stage 这个集合的概念？将 Job 直接拆分成一系列 Task 然后提交执行不就好了吗？实际上，一个计算作业的执行绝不是简单地拆分、提交 Task 那么简单，它还需要考虑 Task 之间的执行顺序、数据流转等问题。
+
+以 WordCount 为例，计算需要经历 `flatMap` → `map` → `reduceByKey` 的过程，其中 `reduceByKey` 需要在获取前序阶段的所有计算结果后才可以运行。在分布式计算中，由于数据是分散在多个节点的，计算任务会被分发到各节点执行，如果不考虑 Task 执行顺序的话，那么一旦 `reduceByKey` 提前运行，用户将得到错误的结果。因此，必须有一个 Task 调度机制，告诉 Spark 集群哪些 Task 先执行、哪些 Task 后执行。而这，便是 Stage 存在的意义，是它帮助 Spark 任务调度构建了蓝图。
+
+#### 划分规则
+
+Stage 的划分方式可以简述为： **在 DAG 中进行反向解析，遇到宽依赖就断开，遇到窄依赖就把当前的 RDD 加入到当前的阶段中。** 之所以这样划分，是因为宽依赖的位置意味着 Shuffle 的发生，表示这个位置后的 RDD 需要等待前序 RDD 计算完成后才可以开始计算。
+
+下图为 Stage 划分的示例：
+
+![](https://magicpenta.github.io/assets/images/stage-757fe4092f6c4a8c87380f928f67d108.svg)
+
+在这个示例中，DAGScheduler 反向解析，在 ***RDD B → RDD A*** 和 ***RDD G → RDD F*** 间发现  **ShuffleDependency** ，于是在这两个位置进行阶段划分，分别得到 Stage 01、Stage 02 和 Stage 03。其中，Stage 01 和 Stage 02 的类型为  **ShuffleMapStage** ，而 Stage 03 的类型为  **ResultStage** 。
+
+*ShuffleDependency 保存在 Shuffle 后面的 RDD 中，但是在阶段划分时，会赋予 Shuffle 前的 Stage。例如，RDD B 的 ShuffleDependency 会赋予 Stage 01 的 ShuffleMapStage，以便于 ShuffleMapTask 可以获取到 ShuffleDependency 中的重要信息。这一点，在后续的 Shuffle 教程中得以体现。*
+
+#### 代码实现
+
+![](https://magicpenta.github.io/assets/images/stage_split-d51ed4c75485da05472ccbdb5ea7c64e.svg)
+
+
+该图为 DAGScheduler 中关于阶段划分的源码实现，简单来说就是：
+
+1. 用户提交作业，`handleJobSubmitted` 方法通过最后一个 RDD 解析出 ResultStage并提交给 `submitStage` 方法
+2. `submitStage` 方法调用 `getMissingParentStages` 反向解析，提取 ResultStage 的 Parent Stage
+3. 若无 Parent Stage，直接调用 `submitMissingTasks` 方法，生成该阶段下的 TaskSet
+4. 若存在 Parent Stage，将其添加到到队列 `waitingStages` 中
+5. 当前序任务完成，`handleTaskCompletion` 会从 `waitingStages` 取出剩余的 Stage（可能既有 ShuffleMapStage 和 ResultStage）并提交，直至生成所有阶段的 TaskSet
+
+*可以看出，Stage 划分的最终产物是 TaskSet，它是一组 Task 序列， **与 Stage 是一一对应的关系** ，其中的 Task 均来自于同一个 Stage，**且 Task 数量与 Stage 中最后一个 RDD 的分区数一致。***
+
+### RPC模块
+
+通过 Stage 划分，我们已经获得了任务集 TaskSet，可以进入到 Task 调度阶段。但是，Task 调度阶段中包含了大量 RPC 交互过程，因此我们有必要提前了解一下 Spark 的 RPC 模块。
+
+### Task调度
+
+Task 调度是本文最后一节也是最为核心的部分。它是一个非常复杂的过程，涉及到 DAGScheduler、TaskScheduler、SchedulerBackend、ExecutorBackend、Executor 等多个模块。
+
+一个相对完整的 Task 调度流转图如下所示：
+
+![](https://magicpenta.github.io/assets/images/total_schedule-d72ae4cd2c18c55f98e234a9ae613875.svg)
+
+*调度流程图根据 Standalone 模式下的流转情况进行绘制，Local、Yarn 等模式下的流转过程会有些许区别。*
+
+在这个流转图中，我们可以将 Task 调度大致分为 5 个阶段：
+
+* 初始化阶段：初始化 TaskScheduler 和 SchedulerBackend 的阶段
+* 提交阶段：任务提交到任务池 rootPool 的阶段
+* 启动阶段：从任务池 rootPool 取出任务并发布到 Executor 的阶段
+* 执行阶段：Executor 执行计算任务并存储计算结果的阶段
+* 回收阶段：任务回收、状态更新与资源释放的阶段
+
+#### 初始化阶段
+
+在前面，我们提到过：
+
+* TaskScheduler 是 Task 调度器，负责 Task 的管理，包括提交（提交给任务池 rootPool）、回收、销毁等
+* SchedulerBackend 是调度后端，负责与 Executor 保持通信，并负责 Task 的提交（提交给 Executor）
+
+所谓初始化阶段便是 SparkContext 调用 `createTaskScheduler` 方法创建 TaskScheduler 和 SchedulerBackend 实例并完成初始化的过程，其流程图如下所示：
+
+![](https://magicpenta.github.io/assets/images/initial-196ae5e8eb8cf5ae95025b136eb18baf.svg)
+
+
+在初始化阶段，TaskScheduler 主要完成以下工作：
+
+* 初始化 SchedulableBuilder，决定任务调度策略，创建任务池 rootPool
+* 启动 SchedulerBackend
+
+SchedulerBackend 主要完成以下工作：
+
+* 创建并维持与 Executor 间的 RPC 连接
+* 申请 Executor 资源
+
+
+受限于篇幅，本文仅介绍 Standalone 模式下申请 Executor 的过程，对其他模式不展开介绍，其过程如下：
+
+![](https://magicpenta.github.io/assets/images/request_executor-c00211cdc5ba1457c30261b8163a764c.svg)
+
+在这个过程中，Executor 的创建发生在 CoarseGrainedExecutorBackend。它是 Executor 的调度后端，会建立与 Driver 的通信连接，然后创建 Executor 实例并将 Executor 的信息传递给 Driver。接收到 Executor 资源后，Driver 端的SchedulerBackend 会将 Executor 资源放入 `executorDataMap`，等待 Task 调度时提取。
+
+
+
+#### 提交阶段
+
+提交阶段由 TaskScheduler 的 `submitTasks` 方法触发，它主要完成以下工作：
+
+* 创建 TaskSetManager
+* 将 TaskSetManager 添加至任务池 rootPool
+
+在这个过程中，存在着两个核心角色：TaskSetManager 和 SchedulableBuilder。
+
+
+**TaskSetManager**
+
+TaskSetManager 由 TaskScheduler 封装 TaskSet 而来，是 TaskScheduler 进行任务调度的基本单元：
+
+![1722071478367](image/Spark/1722071478367.png)
+
+TaskSetManager 负责监控和管理同一个 Stage 中的任务集（包括 Executor 资源的匹配、任务执行结果的处理等），同时也负责管理本地化调度级别 TaskLocality。
+
+*本地化调度是“移动计算”的具体实现，是影响 Spark 性能的关键部分，我们将在启动阶段进行详细介绍。*
+
+TaskSetManager 有 3 个核心方法：
+
+| **方法名**                                                                                     | **功能描述**                                                                                            |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **resourceOffer** ( *execId* ,  *host* ,  *maxLocality* ,  *taskResourceAssignments* ) | 为一个任务分配一个 Executor 资源，以描述符 TaskDescription 返回，该描述符包含了 Task、Executor 及依赖包等信息 |
+| **handleSuccessfulTask** ( *tid* ,  *result* )                                             | 标记任务为成功状态，并通知 DAGScheduler 该任务已完成                                                          |
+| **handleFailedTask** ( *tid* ,  *state* ,  *reason* )                                    | 标记任务为失败状态，并重新加入调度队列                                                                        |
+
+
+SchedulableBuilder 负责将 TaskSetManager 添加到任务池 rootPool，它有两种实现类：
+
+* FIFOSchedulableBuilder：对应 FIFO 调度策略，以先进先出的顺序添加 TaskSetManager
+* FairSchedulableBuilder ：对应 Fair 调度策略，可通过配置控制入队优先级
+
+#### 启动阶段
+
+启动阶段指从任务池 rootPool 取出任务并发布到 Executor 的过程。
+
+相较于提交阶段，启动阶段的调度逻辑要复杂很多，涉及到  **RPC 通信** 、 **资源的筛选** 、 **任务与资源的匹配** 、**本地化调度** 等。以 Standalone 模式为例，这个过程，简单来说，可以表述为：
+
+1. StandaloneSchedulerBackend 的 `reviveOffers` 方法向 DriverEndPoint 发起 ReviveOffers 请求
+2. DriverEndPoint 接收到ReviveOffers 请求，触发 `makeOffers` 方法，筛选出活跃的 Executor 资源，然后以 Seq[WorkerOffer] 的形式发送给 TaskScheduler 的 `resourceOffers` 方法
+3. TaskScheduler 获取到 Executor 资源后，会先行过滤，然后通过 `Random.shuffle(offers)` 将 Executor 资源随机排列，以避免 Task 总是落到同一个 Worker 节点
+4. 排列好资源后，TaskScheduler 便会从 rootPool 提取 TaskSetManager
+5. TaskSetManager 根据 TaskLocation（由 RDD 的 `preferredLocations` 方法计算而来）初始化当前任务集所支持的本地化级别 TaskLocality，并将任务所期望的 `executorId`（Executor 的唯一标识）发送给 PendingTasksByLocality
+6. TaskScheduler 以当前支持的最大本地化级别分配 Executor 给 Task
+7. 若 Task 存储在 PendingTasksByLocality 的期望 `executorId` 与分配到的 Executor 一致，则认为分配成功，**并从 PendingTasksByLocality 中移除已配对成功的 Task 的下标，以避免重复分配的现象发生**
+8. 若 Task 存储在 PendingTasksByLocality 的期望 `executorId` 与分配到的 Executor 不一致，则认为分配失败，此时需要降低当前支持的最大本地化级别，并重新配对，直至配对成功
+9. 将配对成功的 Task 与 Executor 封装成 TaskDescription 对象，返回给 DriverEndPoint
+10. DriverEndPoint 根据 TaskDescription 中的 `executorId` 从 `executorDataMap` 取得 Executor 的通信地址，然后将序列化后的 TaskDescription 对象发布给 Executor，至此启动阶段结束
+
+
+***知识扩展：Executor 申请成功的时间晚于 `reviveOffers` 触发的时间，任务会发布失败吗？***
+
+在上述 **步骤 1**和 **步骤 2** 中，Executor 可能在 `reviveOffers` 触发时还来不及启动，此时会返回空的 WorkerOffer 队列给 TaskScheduler。若出现这种情况，任务难道就直接失败了吗？
+
+我们先来看看 DriverEndpoint 的 `onStart` 方法：
+
+```scala
+overridedef onStart():Unit={
+// Periodically revive offers to allow delay scheduling to work
+val reviveIntervalMs = conf.get(SCHEDULER_REVIVE_INTERVAL).getOrElse(1000L)
+
+  reviveThread.scheduleAtFixedRate(()=> Utils.tryLogNonFatalError {
+    Option(self).foreach(_.send(ReviveOffers))
+},0, reviveIntervalMs, TimeUnit.MILLISECONDS)
+}
+```
+
+该方法会启动一个定时器线程，默认情况下每隔 `1s` 会向 DriverEndPoint 发起 1 个 ReviveOffers 请求。
+
+看到这里，想必大家都已经知道答案了。**即便SchedulerBackend 的 `reviveOffers` 触发时 Executor 还未启动成功，也不影响后续任务的发布。** 因为定时器线程的循环触发意味着 TaskScheduler 的 `resourceOffers` 方法会被循环调用，这样在后续 Executor 启动成功后它一定有机会获取封装了 Executor 资源的 WorkerOffer 队列以发布任务池中的 Task。
+
+简言之，Driver 会一直通过调用 reviveOffers 
+
+#### 执行阶段
+
+
+#### 回收阶段
+
 
 ## 运行模式
 
