@@ -8,7 +8,7 @@
 
 ![图片](https://mmbiz.qpic.cn/sz_mmbiz_png/2BGWl1qPxib1fzJ5GDcNhdf30yoUqxGHSCcPLLczkhtSJOjsKdrYTdXGzrh4m09FtjaHNQsEV9vbe8rOKhQTSOw/640?wx_fmt=png&wxfrom=5&wx_lazy=1&wx_co=1)
 
-#### Topic
+#### Topic 
 
 一个消息中间件，队列不单单只有一个，我们往往会有多个队列，而我们生产者和消费者就得知道：把数据丢给哪个队列，从哪个队列消息。我们需要给队列取名字，叫做**topic**(相当于数据库里边**表**的概念)
 
@@ -70,7 +70,7 @@ Kafka是将partition的数据写在**磁盘**的(消息日志)，不过Kafka只�
 
 - Kafka也不是partition一有数据就立马将数据写到磁盘上，它会先**缓存**一部分，等到足够多数据量或等待一定的时间再批量写入(flush)。
 
-上面balabala地都是讲生产者把数据丢进topic是怎么样的，下面来讲讲消费者是怎么消费的。既然数据是保存在partition中的，那么**消费者实际上也是从partition中取**数据。
+上面都是讲生产者把数据丢进topic是怎么样的，下面来讲讲消费者是怎么消费的。既然数据是保存在partition中的，那么**消费者实际上也是从partition中取**数据。
 
 ![图片](https://mmbiz.qpic.cn/sz_mmbiz_png/2BGWl1qPxib1fzJ5GDcNhdf30yoUqxGHS4WMrj7ibTDBIYgDs9txFNXl6Y030Fh9N7FibcpkT7tVr9mkRBP1ZSKpA/640?wx_fmt=png&wxfrom=5&wx_lazy=1&wx_co=1)
 
@@ -113,11 +113,61 @@ Kafka是将partition的数据写在**磁盘**的(消息日志)，不过Kafka只�
 
 既然提到了Zookeeper，那就多说一句。Zookeeper虽然在新版的Kafka中没有用作于保存客户端的`offset`，但是Zookeeper是Kafka一个重要的依赖。
 
-- 探测broker和consumer的添加或移除。
+- 探测broker和consumer的添加或移除。（临时节点+Watcher机制）
 - 负责维护所有partition的领导者/从属者关系（主分区和备份分区），如果主分区挂了，需要选举出备份分区作为主分区。
 - 维护topic、partition等元配置信息
 
 Kafka 通过巧妙的模型设计，将自己退化成一个海量消息的存储系统。
+
+#### 消费模式
+
+Kafka通过消费者分组的方式灵活的支持了这两个模型
+
+- **点对点模式**
+
+  - 每条消息只能被消费一次，被其中一个消费者消费（所有消费者都属于一个Group）
+
+  <img src="https://img-blog.csdnimg.cn/1713d7f291bc405eba68146bc93a9f0b.png?x-oss-process=image/watermark,type_d3F5LXplbmhlaQ,shadow_50,text_Q1NETiBAZ29ka3p6,size_20,color_FFFFFF,t_70,g_se,x_16" alt="img" style="zoom:50%;" />
+
+- **发布/订阅模式** 
+
+  - 消费者消费数据之后不会清除消息，会被所有消费者消费（每个消费者都是一个单独的Group）
+
+    <img src="https://img-blog.csdnimg.cn/74e7342f81ff425eaf1cb24e8cf93508.png?x-oss-process=image/watermark,type_d3F5LXplbmhlaQ,shadow_50,text_Q1NETiBAZ29ka3p6,size_20,color_FFFFFF,t_70,g_se,x_16" alt="img" style="zoom:50%;" />
+
+### 通信过程
+
+- kafka broker启动，向Zookeeper注册ID（创建临时节点，下线就删除，从而实时获取机器状态），同时会订阅Zookeeper的`brokers/ids`路径，当有新的broker加入或者退出时，可以得到当前所有broker信息
+- 生产者启动的时候会指定`bootstrap.servers`，通过指定的broker地址，Kafka就会和这些broker创建TCP连接
+- 随便连接到任何一台broker之后，然后再发送请求获取元数据信息（包含有哪些主题、主题都有哪些分区、分区有哪些副本，分区的Leader副本等信息）
+- 创建和所有broker的TCP连接
+- 发送消息
+  - 发送消息选择分区
+    - 轮询，按照顺序消息依次发送到不同的分区
+    - 随机，随机发送到某个分区（hash）
+      - 可以通过hash到同一个分区实现发送消息的有序性
+- 消费者和生产者一样，也会指定`bootstrap.servers`属性，然后选择一台broker创建TCP连接，发送请求找到**协调者**所在的broker
+  - **Coordinator**：协调者，主要是为消费者组分配分区以及重平衡Rebalance操作
+- 和协调者broker创建TCP连接，获取元数据
+- 根据分区Leader节点所在的broker节点，和这些broker分别创建连接
+- 消费消息
+
+<img src="https://mmbiz.qpic.cn/mmbiz_jpg/ibBMVuDfkZUkGTrS4o7dp9ONqkuQQ6Kr9fHysciaghG1XMyfNwGTfRD3zxEW8QSglZtc5jz6tU85Ge7pD3b8M1aA/640?wx_fmt=jpeg&tp=webp&wxfrom=5&wx_lazy=1&wx_co=1" alt="图片" style="zoom:67%;" />
+
+Kafka 3.0抛弃zookeeper
+
+- 原因
+  - 运维复杂度
+  - 性能
+    - ZK写性能较差，且也需要选举
+    - ZK集群的元数据过多，集群压力过大，直接影响到很多Watch的延时或者丢失。
+
+- 做法
+  - 实现KRaft协议，解决Controller  Leader 的选举，并且让所有节点达成共识。
+  - 利用之前的 Log 存储机制来保存元数据。
+
+
+[总监问我：Kafka 为什么要抛弃 ZooKeeper？-阿里云开发者社区 (aliyun.com)](https://developer.aliyun.com/article/863097)
 
 ### 优化
 
@@ -252,13 +302,107 @@ Kafka 充分利用二分法来查找对应 offset 的消息位置：
 
 详细：[再过半小时，你就能明白kafka的工作原理了 - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/68052232)
 
+### 常见问题
+
+#### 消息堆积
+
+消息的堆积是因为**生产者的生产速度与消费者的消费速度不匹配**。也可能是因为消息消费失败反复重试造成的。
+
+增加`Topic`的队列（分区）数和消费者数量，**注意分区数一定要增加**，不然新增加的消费者是没东西消费的。**一个Topic中，一个分区只会分配给一个消费者**。
+
+也可以牺牲一部分数据可靠性（副本同步、消息刷盘）来提高可用性
+
+#### 消息可靠
+
+一条消息从生产到被消费，将会经历三个阶段：
+
+- 生产阶段：Producer将消息发送给Broker
+  - 同步发送，只要Broker不抛出异常，就表示发送成功，同步返回，发送消息如果失败或者超时了，则会自动重试，默认重试3次
+  - 异步发送，Producer提供回调函数，消息发送后程序继续执行，消息队列会对消息接受状态进行回调。默认重试1次
+  - 单向发送，发送完不管状态，也不提供回调函数，高可用，低一致性。默认重试1次
+- 存储阶段：消息存储在Broker内存中，同时会持久化到磁盘上
+  - 副本同步机制
+    - Masker和Slave，同一个partition的数据备份到不同Broker上，可以采用同步备份或异步备份。RocketMQ默认情况是异步备份。
+  - 消息刷盘机制
+    - 将消息保存到磁盘上，可以采用同步刷盘和异步刷盘。RocketMQ默认情况是异步刷盘
+  - 如果要保证消息可靠，可以等消息刷盘且副本同步成功后再返回客户端，但是会牺牲部分可用性。
+- 消费阶段：Consumer将消息从Broker中消费
+  - 同步消费，消费线程完成业务操作后再返回给Broker表示消费成功。
+  - 异步消费， 独立业务线程池完成业务操作，可以通过本地消息表+定时扫描 ，保证消息的0丢失
+    - 设计一个本地消息表，可以存储在DB里，或者其它存储引擎里，用户保存消息的消费状态
+    - Producer 发送消息之前，首先保证消息的发生状态，并且初始化为待发送；
+    - 如果消费者（如库存服务）完成的消费，则通过RPC，调用Producer 去更新一下消息状态；
+    - Producer 利用定时任务扫描 过期的消息（比如10分钟到期），再次进行发送。
+
+<img src="https://mmbiz.qpic.cn/sz_mmbiz_png/xlgvgPaib7WO8Tic04SfDar9dQ7xVI7b3DbSgVBBzyLIiam49k9xNyJf4CKnibibiaicd00o4tKUKicNsFibp9FIcmTib8NA/640?wx_fmt=png&from=appmsg&tp=webp&wxfrom=5&wx_lazy=1&wx_co=1" alt="图片" style="zoom:50%;" />
+
+#### 消息重复
+
+消费端做幂等。强校验，如资金、订单（mysql流水表）、弱校验，如通知（Redis缓存，设置超时）。
+
+#### 消息顺序
+
+##### 全局有序
+
+只能由一个生产者往`Topic`发送消息，并且一个`Topic`内部只能有一个队列（分区）。消费者也必须是单线程消费这个队列。
+
+这种情况基本不用。
+
+##### 部分有序
+
+**RocketMQ**提供了**MessageQueueSelector**队列选择机制。
+
+使用**Hash取模法**，让同一个订单发送到同一个队列中，再使用同步发送，只有同个订单的创建消息发送成功，再发送支付消息。这样，我们保证了发送有序。
+
+**RocketMQ**仅保证顺序发送，顺序消费由消费者业务保证（使用同一个消费者单线程顺序消费）
+
+#### 延时消息
+
+延时队列：是一种消息队列，可用于在经历一段时间（或指定时间）后进行消费
+
+应用场景
+
+- 订单超时自动取消
+- 定时推送
+- 定时任务
+- 限时抢购
+
+实现方案
+
+- jdk原生提供的DelayQueue
+- Redis zset
+  - 将所有延迟的消息放入Redis zset，value是时间戳
+  - 消费端轮询，每次取出zset队首元素，和当前时间戳比较，若到执行时间则执行。
+
+- Redis 过期回调
+  - 开启监听key是否过期的事件，一旦key过期会触发一个callback事件
+  - 配置文件添加 notify-keyspace-events Ex
+  - set xiaofu 123 ex 3
+  - xiaofu 3s过期，过期时会执行回调函数
+
+- Rocket MQ 4.x 延时队列
+  - 生产者在发送消息时，设置延迟时间
+  - 将消息投入延迟topic，延迟消息topic名字：SCHEDULE_TOPIC_XXXX（延迟时间），同时保存到CommitLog中
+    - 支持的延迟时间：1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h
+
+  - 线程池，每个topic一个线程，定时轮询CommitLog
+  - 到时间的消息投递到正常的业务消息队列，供消费者消费
+
+- Kafka（Rocket MQ 5.0）时间轮
+  - <img src="https://developer.qcloudimg.com/http-save/yehe-6973249/a90a8537e95ba26bd1c608bfcc5de171.png" alt="img" style="zoom:67%;" />
+  - 实现一个循环队列（延时队列），每次需要延时执行的任务丢到循环队列上
+  - 时间轮算法的优势是不用去遍历所有的任务，每一个时间节点上的任务用链表串起来，当时间轮上的指针移动到当前的时间时，这个时间节点上的全部任务都执行。
+  - 在每个时间节点增加一个 round 字段，记录时间轮转动的圈数，当转到某个节点时，将该节点的所有task round-1，并将round为0的task丢到正常的消息队列中执行
+  - 好处：支持所有延迟时间，不用遍历所有消息
 
 
+### 应用场景
 
-
-
-
-
+- 消息队列
+- 日志聚合，收集并采集日志，做日志分析
+- 监控数据，实时上报CPU、Memory等数据，分析
+- 数据管道，结合Flink做流处理操作
+- 相比而言，实时大流量数据用Kafka较多，业务消息用RocketMQ较多，因为RocketMQ支持的业务功能更多，如事务消息，延迟消息等。
 
 
 
