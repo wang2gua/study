@@ -257,7 +257,6 @@ println("sum => " + sum)
 
 ### 累加器（Accumulators）
 
-
 使用示例
 
 ```
@@ -374,7 +373,6 @@ Stage 的划分方式可以简述为： **在 DAG 中进行反向解析，遇到
 
 ![](https://magicpenta.github.io/assets/images/stage_split-d51ed4c75485da05472ccbdb5ea7c64e.svg)
 
-
 该图为 DAGScheduler 中关于阶段划分的源码实现，简单来说就是：
 
 1. 用户提交作业，`handleJobSubmitted` 方法通过最后一个 RDD 解析出 ResultStage并提交给 `submitStage` 方法
@@ -418,7 +416,6 @@ Task 调度是本文最后一节也是最为核心的部分。它是一个非常
 
 ![](https://magicpenta.github.io/assets/images/initial-196ae5e8eb8cf5ae95025b136eb18baf.svg)
 
-
 在初始化阶段，TaskScheduler 主要完成以下工作：
 
 * 初始化 SchedulableBuilder，决定任务调度策略，创建任务池 rootPool
@@ -429,14 +426,11 @@ SchedulerBackend 主要完成以下工作：
 * 创建并维持与 Executor 间的 RPC 连接
 * 申请 Executor 资源
 
-
 受限于篇幅，本文仅介绍 Standalone 模式下申请 Executor 的过程，对其他模式不展开介绍，其过程如下：
 
 ![](https://magicpenta.github.io/assets/images/request_executor-c00211cdc5ba1457c30261b8163a764c.svg)
 
 在这个过程中，Executor 的创建发生在 CoarseGrainedExecutorBackend。它是 Executor 的调度后端，会建立与 Driver 的通信连接，然后创建 Executor 实例并将 Executor 的信息传递给 Driver。接收到 Executor 资源后，Driver 端的SchedulerBackend 会将 Executor 资源放入 `executorDataMap`，等待 Task 调度时提取。
-
-
 
 #### 提交阶段
 
@@ -446,7 +440,6 @@ SchedulerBackend 主要完成以下工作：
 * 将 TaskSetManager 添加至任务池 rootPool
 
 在这个过程中，存在着两个核心角色：TaskSetManager 和 SchedulableBuilder。
-
 
 **TaskSetManager**
 
@@ -465,7 +458,6 @@ TaskSetManager 有 3 个核心方法：
 | **resourceOffer** ( *execId* ,  *host* ,  *maxLocality* ,  *taskResourceAssignments* ) | 为一个任务分配一个 Executor 资源，以描述符 TaskDescription 返回，该描述符包含了 Task、Executor 及依赖包等信息 |
 | **handleSuccessfulTask** ( *tid* ,  *result* )                                             | 标记任务为成功状态，并通知 DAGScheduler 该任务已完成                                                          |
 | **handleFailedTask** ( *tid* ,  *state* ,  *reason* )                                    | 标记任务为失败状态，并重新加入调度队列                                                                        |
-
 
 SchedulableBuilder 负责将 TaskSetManager 添加到任务池 rootPool，它有两种实现类：
 
@@ -489,7 +481,6 @@ SchedulableBuilder 负责将 TaskSetManager 添加到任务池 rootPool，它有
 9. 将配对成功的 Task 与 Executor 封装成 TaskDescription 对象，返回给 DriverEndPoint
 10. DriverEndPoint 根据 TaskDescription 中的 `executorId` 从 `executorDataMap` 取得 Executor 的通信地址，然后将序列化后的 TaskDescription 对象发布给 Executor，至此启动阶段结束
 
-
 ***知识扩展：Executor 申请成功的时间晚于 `reviveOffers` 触发的时间，任务会发布失败吗？***
 
 在上述 **步骤 1**和 **步骤 2** 中，Executor 可能在 `reviveOffers` 触发时还来不及启动，此时会返回空的 WorkerOffer 队列给 TaskScheduler。若出现这种情况，任务难道就直接失败了吗？
@@ -511,29 +502,165 @@ val reviveIntervalMs = conf.get(SCHEDULER_REVIVE_INTERVAL).getOrElse(1000L)
 
 看到这里，想必大家都已经知道答案了。**即便SchedulerBackend 的 `reviveOffers` 触发时 Executor 还未启动成功，也不影响后续任务的发布。** 因为定时器线程的循环触发意味着 TaskScheduler 的 `resourceOffers` 方法会被循环调用，这样在后续 Executor 启动成功后它一定有机会获取封装了 Executor 资源的 WorkerOffer 队列以发布任务池中的 Task。
 
-简言之，Driver 会一直通过调用 reviveOffers 
+***知识扩展：Executor 是一次性分配给所有 Task 还是根据资源数逐一分配？***
+
+![](https://magicpenta.github.io/assets/images/resource_offer-9b01b847231f4942a52f42170e776a63.svg)
+
+简言之，Driver 会一直通过调用 resourceOffers（可能被周期性的makeOffers，或者后续的StatusUpdate触发）, 将task尽可能分配到符合本地化调度级别的Executor上面。
+
+***知识扩展：本地化调度是什么？支持哪些级别？***
+
+“移动计算”，即将计算任务移动到数据所在节点，是大数据计算中提升性能的一种手段。Spark 中的本地化调度机制，就是“移动计算”的实现方案。
+
+| PROCESS_LOCAL | 进程本地化，Task 和数据在同一个 Executor 中，性能最好                                |
+| ------------- | ------------------------------------------------------------------------------------ |
+| NODE_LOCAL    | 节点本地化，Task 和数据在同一个节点但是不在同一个 Executor，数据需要在进程间进行传输 |
+| NO_PREF       | 对于 Task 来说，从哪里获取都一样，没有好坏之分                                       |
+| RACK_LOCAL    | 机架本地化，Task 和数据在同一个机架的两个节点上，数据需要通过网络在节点之间进行传输  |
+| ANY           | Task 和数据可以在集群的任何地方，甚至不在一个机架中，性能最差                        |
+
+***知识扩展：本地化调度是怎么“移动计算”的？调度失败会如何？***
+
+当 TaskSetManager 创建时，会初始化 PendingTasksByLocality。PendingTasksByLocality 中含有 3 个核心变量：
+
+| **变量名称** | **含义**                                             |
+| ------------------ | ---------------------------------------------------------- |
+| forExecutor        | 存储所有任务期望的符合 PROCESS_LOCAL 级别的 `executorId` |
+| forHost            | 存储所有任务期望的符合 NODE_LOCAL 级别的 `executorId`    |
+| noPrefs            | 存储所有任务期望的符合 RACK_LOCAL 级别的 `executorId`    |
+
+有时候期望的 Executor 资源无法在 `spark.locality.wait` 指定的时间范围内及时获取，此时会触发本地化调度级别的降级过程：**仍然尝试以当前本地化调度级别发布任务，若依旧失败，则降低级别，尝试将期望级别较低的 Executor 资源提供给 Task，直至成功。**
+
+*如果发现大量计算任务的本地化调度级别跨节点甚至是跨机架，可以考虑增加 `spark.locality.wait` 的值，以适当提高本地化调度的等待时间。但是在大多数情况下，默认值 `3s` 是可以有效运作的。*
 
 #### 执行阶段
 
+**STEP 01：依赖包下载**
+
+Driver 端在发布任务的时候，会将所需的依赖信息注入到 TaskDescription 对象中。在 Executor 执行计算之前，需要先调用 `updateDependencies` 方法下载所需依赖包，并将其添加至 ClassLoader 中，以确保 Executor 完全具备执行 Task 的能力。
+
+**STEP 02：执行计算**
+
+下载完依赖后，Executor 会将 TaskDescription 中的 `serializedTask` 反序列化为 Task 对象，然后通过 Task 对象的 `runTask` 方法执行计算。`runTask` 方法是抽象类，需要子类负责实现，所以真实的计算逻辑由 Task 的子类决定。
+
+在 Spark 中，Task 的子类有 ShuffleMapTask 和 ResultTask 两种。前者表示 ShuffleMapStage 中的任务；后者表示最终响应数据给 Application 的任务。
+
+若 Task 为 ShuffleMapTask，则 `runTask` 主要做的事情为：
+
+* 反序列化字节数组 `taskBinary`，获得 RDD 和 ShuffleDependency 实例
+* 从 SparkEnv 中获取 ShuffleManager，并通过 ShuffleManager 获取 ShuffleWriter 实例
+* 调用 RDD 的 `iterator` 方法执行计算，并使用 ShuffleWriter 将计算结果写入到 Executor 端的存储系统
+* **返回 MapStatus 对象** ，该对象包含了 Executor 端的 BlockManager 地址
+
+若 Task 为 ResultTask，则 `runTask` 主要做的事情为：
+
+* 反序列化字节数组 `taskBinary`，获得 RDD 实例和用户函数 `func`
+* 调用 RDD 的 `iterator` 方法获取迭代器，将其作为参数传入用户函数 `func` 执行计算，并 **直接返回计算后的结果**
+
+**STEP 03：处理计算结果**
+
+我们先了解两个与计算结果相关的类的概念：
+
+| **类名称**   | **含义**                                                           |
+| ------------------ | ------------------------------------------------------------------------ |
+| DirectTaskResult   | 表示直接计算结果，以 ByteBuffer 存储计算后的结果                         |
+| IndirectTaskResult | 表示间接计算结果，仅存储 DirectTaskResult 在 BlockManager 的引用及其大小 |
+
+根据 `resultSize` 的大小，Executor 采用了 3 种不同的方式处理计算结果：
+
+* 若 `resultSize` > `maxResultSize`，直接丢弃并转化为 IndirectTaskResult 回传给 Driver
+* 若 `resultSize` > `maxDirectResultSize`，存储到 BlockManager 并转化为 IndirectTaskResult 回传给 Driver
+* 若 `resultSize` 不符合以上两种情况，直接回传给 Driver
+
+*`maxResultSize` 表示最大结果大小，由 Spark 配置参数 `spark.driver.maxResultSize` 指定，默认值为 `1g`；`maxDirectResultSize` 表示最大直接回传结果大小，由 Spark 配置参数 `spark.task.maxDirectResultSize` 和 `spark.rpc.message.maxSize` 中的最小值决定，前者默认值为 `1MB`，后者默认值为 `128MB`。*
 
 #### 回收阶段
 
+回收阶段由 ExecutorBackend 的 `statusUpdate` 方法发起，在 Standalone 模式下，主要过程为：
 
-## 运行模式
+1. 构造 StatusUpdate 对象（包含 `executorId`、`taskId`、`state`、`data` 等字段），发给 DriverEndPoint
+2. DriverEndPoint 接收请求后，调用 TaskScheduler 的 `statusUpdate` 方法接收回收任务
+3. 若任务状态为 `FINISHED`，TaskResultGetter 的 `enqueueSuccessfulTask` 方法会对回收任务进行异步处理：
+   * 若接收结果为 DirectTaskResult，直接获取计算结果返回值
+   * 若接收结果为 IndirectTaskResult，则先通过 `blockId` 找到 BlockManager，再获取计算结果返回值
+4. 调用 TaskSetManager 的 `handleSuccessfulTask` 方法，标记任务执行结果，并通知 DAGScheduler
+5. DAGScheduler 通过 `handleTaskCompletion` 方法完成最终的回收：
+   * 若任务类型为 ShuffleMapTask， **将 MapStatus 注册到 MapOutputTracker** ，然后继续提交队列中的任务
+   * 若任务类型为 ResultTask，标记 Job 为结束状态，**上报计算结果到 JobWaiter 并回传给 Application**
 
-（1）、Spark On Standalone模式为：TaskSchedule。
+至此，我们完成了对 Spark 任务调度整个过程的梳理，但是仔细思索的话，我们会发现还有一些很重要的问题没有展开讨论，那就是：**ResultTask 是怎么获得 ShuffleMapTask 中的计算结果的？两者之间究竟是通过什么方式完成数据传递？**
 
-（2）、Yarn Client模式为：YarnClientClusterScheduler。
-
-（3）、Yarn Cluster模式为：YarnClusterScheduler。
-
-#### 几种部署方式：spark on yarn-client/ spark on yarn-cluster/spark on standalone
-
-Yarn是什么？做什么的？
+这一切，都将在我们的下一篇文章《Spark Shuffle》中得到解答。
 
 ## Spark Shuffle
 
 ### Shuffle 简介
+
+## 运行模式
+
+
+Spark 集群支持以下部署模式：
+
+* Standalone
+* Mesos
+* YARN
+* Kubernetes
+
+本文主要介绍 Standalone、Standalone（HA）和 YARN 三种部署模式，
+
+### Standalone 模式
+
+Standalone 为独立部署模式，在该模式下，用户可以** 不依赖第三方组件** 部署单独的 Spark 集群。
+
+Standalone 模式中包含 Master 节点和 Slave节点，体现了经典的 Master-Slave 架构。其中，Master 节点会启动 Master 进程，负责集群资源管理和任务调度，Worker 节点会启动 Worker 进程，负责实际计算任务的执行。
+
+**集群规划**
+
+假设当前有 3 台服务器，主机名分别为 master，slave1，slave2，我们可以按照如下方式规划 Spark 集群：
+
+| **主机名** | **启动 Master** | **启动 Worker** |
+| ---------------- | --------------------- | --------------------- |
+| master           | ✅                    | ✅                    |
+| slave1           | ❌                    | ✅                    |
+| slave2           | ❌                    | ✅                    |
+
+### Standalone（HA）模式
+
+
+普通的 Standalone 模式中，Master 进程只有一个。对于生产环境来说，这是不可接收的，一旦 Master 进程异常下线，整个 Spark 集群都将处于不可用的状态。
+
+为解决这个问题，Spark 支持了 Standalone（HA）模式，通过引入 Zookeeper 以实现 Master 主备机制。
+
+**集群规划**
+
+在高可用要求下，我们的集群规划如下所示：
+
+| **主机名** | **启用 Zookeeper** | **启用 Master** | **启用 Worker** |
+| ---------------- | ------------------------ | --------------------- | --------------------- |
+| master           | ✅                       | ✅                    | ✅                    |
+| slave1           | ✅                       | ✅                    | ✅                    |
+| slave2           | ✅                       | ❌                    | ✅                    |
+
+*如果我们将主节点的 Master 进程 kill 掉，该备用 Master 的状态将变为 `ALIVE`，并以 Master 的角色对外提供服务。*
+
+### YARN模式
+
+在 Standalone 模式中，计算资源由 Spark 集群自身完成调度和分配。
+
+尽管它能稳定工作，但是，Spark 毕竟是计算框架，资源调度并非它的强项，若使用 Standalone 模式， **集群资源利用率可能无法达到最理想的状态** 。
+
+因此，将 Spark 计算应用运行在 Yarn（专业的资源调度框架）模式中，成为大部分厂商的选择。
+
+**集群规划**
+
+使用 Yarn 模式，无需部署和启动独立的 Spark 集群，但是需要部署 Hadoop 和 Yarn 环境：
+
+| **主机名** | **启动的 JVM 进程**                                     |
+| ---------------- | ------------------------------------------------------------- |
+| master           | NameNode、DataNode、ResourceManager、NodeManager、JournalNode |
+| slave1           | NameNode、DataNode、ResourceManager、NodeManager、JournalNode |
+| slave2           | DataNode、NodeManager、JournalNode                            |
+
 
 ## 性能调优
 
@@ -560,3 +687,4 @@ Yarn是什么？做什么的？
 2. https://magicpenta.github.io/docs/
 3. Spark 算子：https://developer.aliyun.com/article/653927
 4. Spark 算子源码：https://www.cnblogs.com/ronnieyuan/p/11768536.html
+5. Spark中的 RPC：https://zhuanlan.zhihu.com/p/28893155
