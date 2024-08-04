@@ -596,8 +596,86 @@ Driver 端在发布任务的时候，会将所需的依赖信息注入到 TaskDe
 
 ### Shuffle 简介
 
-## 运行模式
+在前面的文章中我们提到，RDD 的依赖类型可以分为 **窄依赖** 和  **宽依赖** 。宽依赖存在的地方，便意味着 Shuffle 的发生。
 
+Shuffle 翻译成中文是洗牌的意思。在 Spark 中，Shuffle 也确实担当了“洗牌”的角色， **它会对 ShuffleMapStage 中 RDD 的数据进行重分区，以实现不同分区间的数据分组。** 这是分布式计算中不可或缺的一项特性。试想，在分布式环境中，我们的数据都是分散在集群里的各个节点，如果没有 Shuffle 这种机制，分布在不同节点上的数据如何能完成排序、聚合等操作？
+
+为了更直观地解释 Shuffle 的概念，我们以 WordCount 为例展示 Shuffle 运作的过程：
+
+![img](https://magicpenta.github.io/assets/images/wordcount-221dc204c8de2f1206e542f9df34572a.svg)在这个例子中，我们发现，借助 Shuffle，不同分区中属于同一个 key 的数据得以聚合到同一个下游分区中。如图中的 `panda`，它原本分散在 2 个 RDD 分区，经 Shuffle 后重组到了同一个分区中。不过，显而易见的是，为了实现这个过程，Shuffle需要在不同 Executor 甚至是不同主机间复制数据，这导致 Shuffle 成为一种复杂且成本高昂的操作。
+
+本文尝试从  **发展历程** 、**执行过程** 3 个方面来探究 Spark Shuffle，尽可能地揭开 Spark Shuffle 的神秘面纱。但由于 Spark Shuffle 确实是非常复杂且分支众多的模块，笔者也不敢保证自己所理解的是正确的、全面的。若发现文章有纰漏之处，也请多多包涵，并指点一二。
+
+## Shuffle 发展历程
+
+自 Spark 面世以来，它的 Shuffle 模块历经了多次迭代 ：
+
+* Spark 0.8 及以前使用 Hash Based Shuffle
+* Spark 0.8.1 为 Hash Based Shuffle 引入 File Consolidation 机制
+* Spark 0.9 引入 ExternalAppendOnlyMap
+* Spark 1.1 引入 Sort Based Shuffle，但默认仍为 Hash Based Shuffle
+* Spark 1.2 默认的 Shuffle 方式改为 Sort Based Shuffle
+* Spark 1.4 引入 Tungsten-Sort Based Shuffle
+* Spark 1.6 Tungsten-sort 并入 Sort Based Shuffle
+* Spark 2.0 Hash Based Shuffle 退出历史舞台
+
+总之，到了 Spark 3.x 版本，在 Spark Core 已经看不到 Hash Based Shuffle 的相关源码了。
+
+当然，值得一提的是，Hash Based Shuffle 之所以被弃用，主要原因是  **其在 shuffle 过程中容易生成大量文件，导致读写性能降低，进而影响到 shuffle 的效率** 。而在 Sort Based Shuffle 中，这个问题得到了有效的解决，具体的解决方式，且看下文分解。
+
+比较Hash Based Shuffle 与 Sort Based Shuffle？
+
+* ShuffleManager：主要复制shuffle过程中的执行，计算和处理的组件，Spark1.2之前是HashShuffleManager，Spark1.2之后是SortShuffleManager。Shuffle是划分DAG中Stage的标识，RDD中的Transformation函数中，又分为宽依赖和窄依赖，这两个主要的区别就是是否发生Shuffle，宽依赖会发生Shuffle。
+* HashShuffleManager：
+* * ShuffleWriter：
+    * 会创建出M*R个文件，文件的开销很大
+    * 数据的落盘是通过ShuffleWriterGroup的writers方法得到一个DiskBlockObjectWriter对象；
+    * writers是通过ShufflleWriterDependency来获取后续Partition的数量；
+    * 输出结果放在HashMap中；个人认为的亮点：每一个Partition相当于一个任务，这个数量和后续的任务相对应，从而形成流水线高效并发地处理任务。
+  * ShuffleRead：
+    * 都是使用HashShuffleReader的read方式；
+    * 调用MapOutputTracer的getMapSizesByExecutorId方法来获取上游Shuffle的位置信息；
+    * 请求Driver端的MapOutputTrackerMaster来获取上游Shuffle的位置信息；
+    * 判断ShuffleDependency是否定义aggeration；
+    * 采用外部排序的方式来对数据进行排序并放入内存中。
+* SortShuffleManager：
+  * ShuffleWriter：
+    * 判断是否需要Combine，如果需要，则在外部排序中进行聚合并排序；
+    * 外部排序用PartitionedAppendOnlyMap来存放数据；
+    * Map超过阈值则spill到磁盘，所有数据处理完则merge内存和磁盘的数据，形成一个大文件；
+    * 每个Partition的在数据文件中的起始位置和结束位置写入到索引文件
+    * *个人认为的亮点：减少文件的输出，aggregator从内存操纵移动到了磁盘。*
+  * ShuffleRead：
+    * 都是使用HashShuffleReader的read方式；
+    * 调用MapOutputTracer的getMapSizesByExecutorId方法来获取上游Shuffle的位置信息；
+    * 请求Driver端的MapOutputTrackerMaster来获取上游Shuffle的位置信息；
+    * 判断ShuffleDependency是否定义aggeration；
+    * 采用外部排序的方式来对数据进行排序并放入内存中。
+
+### Shuffle 执行过程
+
+Shuffle 的执行过程可以分为两大块，分别是 Shuffle Write 和 Shuffle Read，其中：
+
+* Shuffle Write 是 map 端（Shuffle 前的任务）将自身计算完的结果持久化到磁盘的过程
+* Shuffle Read 是 reduce 端（Shuffle 后的任务）从磁盘读取 map 端计算结果的过程
+
+结合代码来看，Spark Shuffle 的执行过程主要包含以下步骤：
+
+1. map 端任务使用 ShuffleWriter 将自身的计算结果输出到 Executor 所在节点的磁盘
+2. 完成 shuffle 文件落地后，map 端任务会响应 MapStatus 给 DAGScheduler，该对象包含了 BlockManager 的地址
+3. DAGScheduler 将接收到的 BlockManager 地址及 `shuffleId` 注册到 MapOutputTracker 实例
+4. reduce 端任务启动时，会从 MapOutputTracker 实例获取 shuffle 文件的地址，然后完成读取并计算出最终结果
+
+![img](https://magicpenta.github.io/assets/images/shuffle-7d7666fcab02994bb494e9c8449119d1.svg)
+
+
+
+
+
+
+
+
+## 运行模式
 
 Spark 集群支持以下部署模式：
 
@@ -625,7 +703,6 @@ Standalone 模式中包含 Master 节点和 Slave节点，体现了经典的 Mas
 | slave2           | ❌                    | ✅                    |
 
 ### Standalone（HA）模式
-
 
 普通的 Standalone 模式中，Master 进程只有一个。对于生产环境来说，这是不可接收的，一旦 Master 进程异常下线，整个 Spark 集群都将处于不可用的状态。
 
@@ -661,7 +738,6 @@ Standalone 模式中包含 Master 节点和 Slave节点，体现了经典的 Mas
 | slave1           | NameNode、DataNode、ResourceManager、NodeManager、JournalNode |
 | slave2           | DataNode、NodeManager、JournalNode                            |
 
-
 ## 性能调优
 
 1. #### 内存溢出
@@ -688,3 +764,4 @@ Standalone 模式中包含 Master 节点和 Slave节点，体现了经典的 Mas
 3. Spark 算子：https://developer.aliyun.com/article/653927
 4. Spark 算子源码：https://www.cnblogs.com/ronnieyuan/p/11768536.html
 5. Spark中的 RPC：https://zhuanlan.zhihu.com/p/28893155
+6. Spark 性能调优：https://endymecy.gitbooks.io/spark-config-and-tuning/content/meituan/spark-tuning-pro.html
